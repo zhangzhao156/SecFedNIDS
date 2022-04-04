@@ -473,34 +473,6 @@ def defence_our(omega_locals,w_locals,w_local_pre):
     w_glob = defence_det(w_locals, pre_out_label)
     return w_glob
 
-def defence_pca(w_locals,w_local_pre):
-    X_norm = []
-    for i in range(0, len(w_locals)):
-        selected_weights = []
-        for n in w_locals[0].keys():
-            # print(n)
-            c = w_locals[i][n].cpu()
-            c_pre = w_local_pre[n].cpu()
-            # selected_weights.append((c.view(-1).detach().numpy()))
-            selected_weights.append((c.view(-1).detach().numpy() - c_pre.view(-1).detach().numpy()))
-        X_norm.append(list(chain(*selected_weights)))
-    X_norm = np.array(X_norm)
-    print('X', X_norm.shape)
-    scaler = MinMaxScaler()
-    # scaler = StandardScaler()
-    scaler.fit(X_norm)
-    X_norm = scaler.transform(X_norm)
-    clf = PCA(n_components=2, contamination=0.4, random_state=42)  ##
-    clf.fit(X_norm)
-    pre_out_label = clf.labels_
-    pre_out_prob = clf.decision_scores_
-    print('prediction', pre_out_label)
-    print(confusion_matrix(Y_norm.astype(int), pre_out_label))
-    print(classification_report(Y_norm.astype(int), pre_out_label))
-    # print("train AC", accuracy_score(Y_norm.astype(int), pre_out_label))
-    ### Federated aggregation with defence
-    w_glob = defence_det(w_locals, pre_out_label)
-    return w_glob
 
 def defence_pca2(w_locals,w_local_pre):
     X_norm = []
@@ -575,36 +547,6 @@ def defence_vae(w_locals):
     w_glob = defence_det(w_locals, pre_out_label)
     return w_glob
 
-def defence_randomselection(w_locals,w_local_pre):
-    X_norm = []
-    for i in range(0, len(w_locals)):
-        selected_weights = []
-        for n in w_locals[0].keys():
-            # print(n)
-            c = w_locals[i][n].cpu()
-            c_pre = w_local_pre[n].cpu()
-            # selected_weights.append((c.view(-1).detach().numpy()))
-            selected_weights.append((c.view(-1).detach().numpy() - c_pre.view(-1).detach().numpy()))
-        X_norm.append(list(chain(*selected_weights)))
-    X_norm = np.array(X_norm)
-    features_num = X_norm.shape[1]
-    selected_index_x = np.random.choice([i for i in range(features_num)], 100, replace=False)
-    X_norm = X_norm[:, selected_index_x]
-    print('X', X_norm.shape)
-    scaler = MinMaxScaler()
-    # scaler = StandardScaler()
-    scaler.fit(X_norm)
-    X_norm = scaler.transform(X_norm)
-    clf = SOS(contamination=0.4, perplexity=90)
-    clf.fit(X_norm)
-    pre_out_label = clf.labels_
-    print('prediction', pre_out_label)
-    print(confusion_matrix(Y_norm.astype(int), pre_out_label))
-    print(classification_report(Y_norm.astype(int), pre_out_label))
-    # print("train AC", accuracy_score(Y_norm.astype(int), pre_out_label))
-    ### Federated aggregation with defence
-    w_glob = defence_det(w_locals, pre_out_label)
-    return w_glob
 
 def consolidate(Model, Weight, MEAN_pre, epsilon):
     OMEGA_current = {n: p.data.clone().zero_() for n, p in Model.named_parameters()}
@@ -750,58 +692,6 @@ def cw_l2_attack(model, images, labels, targeted=False,c=1.0 , kappa=0, max_iter
     attack_images[:,:,changes_index] = attack_images_change[:,:,0:len(changes_index)]
     return attack_images
 
-def poisongan(model,x,y):
-    x = x.to(device)
-    y = y.to(device)
-    changes_index = list(
-        set([i for i in range(42)]) - set([3, 5, 7, 10, 12, 14, 16, 18, 22, 26, 30]))  ### 31 changed featurese
-    D = model
-    #####
-    h_in = 42
-    h_dim = 128
-    G = torch.nn.Sequential(
-        torch.nn.Linear(h_in, h_dim),
-        torch.nn.LeakyReLU(True),
-        torch.nn.Linear(h_dim, h_in),
-        torch.nn.Sigmoid()
-    )
-    G = G.double().to(device)
-    ####
-    # G = Generator().double().to(device)
-    optimizer = torch.optim.Adam(G.parameters(), lr=1e-4)#, lr=0.1
-    for i in range(1000):
-        # z = Variable(torch.randn(x.size(0), 31)).to(device, dtype=torch.double)
-        # G_out = G(z)
-        # # x_fake = x.reshape((x.size(0),68))
-        # # x_fake[:,changes_index]=G_out[:,0:len(changes_index)]
-        # # x_fake=x_fake.reshape((x.size(0), 1, 68))
-        # x_fake = x
-        # # print('xfake', x_fake.shape)
-        # x_fake[:,0, changes_index] = G_out[:,0:len(changes_index)]
-        # x_fake = Variable(x_fake)
-        # # x_fake = G_out
-        # # x_fake = x_fake.reshape((x.size(0), 1, 68))
-
-        z = Variable(torch.randn(x.size(0), 42)).to(device, dtype=torch.double)
-        G_out = G(z)
-        x_fake = G_out.reshape((G_out.size(0), 1, 42))
-        x_fake = Variable(x_fake)
-
-        D_fake = D(x_fake)
-        # D_f, _ = D_fake.max(1)
-        D_f = D_fake[:,0]
-        D_r = D_fake[:, 1]
-        # print('D_fake',D_fake)
-        # print('D_F',D_f)
-        # loss = torch.nn.MSELoss()(x_fake, Variable(x))##reduction='sum'
-        # loss = torch.nn.CrossEntropyLoss()(D_out, Variable(y))
-        loss = -torch.mean(torch.log(D_f))-torch.mean(torch.log(1-D_r))
-        optimizer.zero_grad()
-        loss.backward(retain_graph=True)#
-        optimizer.step()
-        print('loss',loss.item())
-        # z = x_fake
-    return x_fake
 
 
 if __name__ == '__main__':
@@ -872,17 +762,11 @@ if __name__ == '__main__':
                 print('##########poison client', num_poison_client)
                 poison_client_flag = True
                 res_list = [i for i in range(len(y)) if y[i] == 1]
-                ###### 标签翻转
+                ###### Label flipping
                 y[res_list[0:num_poison]] = 0
                 ldr_train = DataLoader(ReadData(x, y), batch_size=1024, shuffle=True)
                 epochs_per_task = 5
-                ############ poisonGAN
-                # x2 = x[res_list, :, :]
-                # y2 = y[res_list]
-                # best_model = torch.load('save_model_unsw15_noniid_20210802.pkl')
-                # x2_adv = poisongan(model=best_model, x=torch.tensor(x2), y=torch.LongTensor(y2))
-                # x[res_list, :, :] = x2_adv[0:len(res_list), :, :].detach().cpu().numpy()
-                ###### CW攻击
+                ###### CW
                 # x2 = x[res_list, :, :]
                 # y2 = y[res_list]
                 # best_model = torch.load('save_model_unsw15_noniid_20210802.pkl')
@@ -1026,27 +910,7 @@ if __name__ == '__main__':
             print('Time:\t', str(t1 - t0))
             test_acc_geomed, test_loss_geomed = test_w(w_glob_geomed, dataset_test)
             print('GEOMED Test set: Average loss: {:.4f} \tAccuracy: {:.2f}'.format(test_loss_geomed, test_acc_geomed))
-            t1 = time.clock()
-            w_glob_rs = defence_randomselection(w_locals, w_local_pre)
-            t1 = time.clock()
-            print('Time:\t', str(t1 - t0))
-            test_acc_rs, test_loss_rs = test_w(w_glob_rs, dataset_test)
-            print('RandomSelection Test set: Average loss: {:.4f} \tAccuracy: {:.2f}'.format(test_loss_rs, test_acc_rs))
-        # if (args.defence == 'our') : #& (interation > 0)
-        #     w_glob = defence_our(omega_locals, w_locals, w_local_pre)
-        # elif (args.defence == 'pca'):  ##
-        #     w_glob = defence_pca(w_locals, w_local_pre)
-        # elif (args.defence == 'vae'):  ##
-        #     w_glob = defence_vae(w_locals)
-        # elif (args.defence == 'krum'): #& (interation > 0)
-        #     ## defence,krum
-        #     w_glob = defence_Krum(w=w_locals,c=(num_clients-num_poison_client-2))
-        # elif (args.defence == 'geomed'): #& (interation > 0)
-        #     ### defence,geomedian
-        #     w_glob = defence_GoeMed(w=w_locals)
-        # elif args.defence == 'fedavg':
-        #     ### FeaAvg
-        #     w_glob = FedAvg(w_locals)
+
         else:
             w_glob = FedAvg(w_locals)
             # pass
