@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
-# @Time    : 2021/9/28 21:44
+# @Time    : 2021/7/13 17:02
 # @Author  : zhao
-# @File    : main_fl_unsw15_oneshot_filter_new.py
+# @File    : main_fl_unsw15_filter.py
 
 
 import pandas as pd
@@ -13,7 +13,6 @@ import torch
 from torch.utils.data import Dataset, DataLoader
 from torch.autograd import Variable
 from torch.nn.modules import activation, dropout,batchnorm
-import torch.nn.functional as F
 from sklearn.utils import shuffle
 from sklearn.metrics import classification_report, confusion_matrix, precision_recall_fscore_support,accuracy_score
 import copy
@@ -21,20 +20,28 @@ from collections import Counter,Iterable, defaultdict, deque, OrderedDict
 from itertools import chain,combinations, permutations
 import random
 from pyod.models.sos import SOS
+from pyod.models.knn import KNN
+from pyod.models.cblof import CBLOF
+from pyod.models.hbos import HBOS
 from pyod.models.pca import PCA
+from pyod.models.ocsvm import OCSVM
+from pyod.models.iforest import IForest
+from scipy.stats.mstats import gmean
 from scipy.spatial.distance import cdist, euclidean
+import gzip
 import argparse
-from Net import CNN_UNSW,MLP_UNSW
+from Net import CNN,MLP,CNN_UNSW,MLP_UNSW
+import h5py
 from imblearn.over_sampling import RandomOverSampler
 from imblearn.under_sampling import RandomUnderSampler
 import math
-import sklearn
 import inspect
 import warnings
 warnings.filterwarnings('ignore')
 import traceback
 from hprofile import Profile, jaccard_simple
 from utils import TorchHook, DDPCounter, submatrix_generator, get_index
+import pickle
 
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
 
@@ -78,7 +85,7 @@ def readdataset():
     df_train = shuffle(df_train)
     np_features_train = df_train.values
 
-    np_features_train = np_features_train[:, np.newaxis, :]
+    np_features_train = np_features_train[:, np.newaxis, :].astype(np.double)
     np_label_train = df_train.index.values.ravel()
     print('train',sorted(Counter(np_label_train).items()))
 
@@ -93,7 +100,7 @@ def readdataset():
     features_test = df_test.values
     np_features_test = np.array(features_test)
 
-    np_features_test = np_features_test[:, np.newaxis, :]
+    np_features_test = np_features_test[:, np.newaxis, :].astype(np.double)
     np_label_test = df_test.index.values.ravel()
     print('test',sorted(Counter(np_label_test).items()))
     return np_features_train, np_label_train,np_features_test,np_label_test
@@ -339,7 +346,6 @@ class TorchProfiler():
 
     def _contrib_conv1d(self, x_in, y_out, R, layers,
                         threshold=0.001):  ###(self, x_in, y_out, ydx, layer, threshold=0.1)
-        threshold = 0.1
         neuron_counts = list()
         synapse_counts = Counter()
         synapse_weights = list()
@@ -381,7 +387,8 @@ class TorchProfiler():
         return neuron_counts, synapse_counts, synapse_weights, Rx
 
     def _contrib_linear(self, x_in, y_out, R, layers, threshold=0.0001):
-        threshold = 0.1
+        # j = ydx[0]
+        # print('j',j,'ydx',ydx)
         neuron_counts = list()
         synapse_counts = Counter()
         synapse_weights = list()
@@ -443,23 +450,6 @@ def iid(dataset, num_users):
         all_idxs = list(set(all_idxs) - dict_users[i])
     return dict_users
 
-def mnist_noniid(dataset, num_users):
-    num_shards, num_imgs = 500,1568  #400, 1960
-    idx_shard = [i for i in range(num_shards)]
-    dict_users = {i: np.array([], dtype='int64') for i in range(num_users)}
-    idxs = np.arange(num_shards*num_imgs)
-    labels = dataset.y_train
-    # sort labels
-    idxs_labels = np.vstack((idxs, labels)) ###[[idxs 0,1,2,3],[labels 5,5,7,2]]
-    idxs_labels = idxs_labels[:,idxs_labels[1,:].argsort()]
-    idxs = idxs_labels[0,:]
-    # divide and assign
-    for i in range(num_users):
-        rand_set = set(np.random.choice(idx_shard, 5, replace=False))
-        idx_shard = list(set(idx_shard) - rand_set)
-        for rand in rand_set:
-            dict_users[i] = np.concatenate((dict_users[i], idxs[rand*num_imgs:(rand+1)*num_imgs]), axis=0)
-    return dict_users
 
 def noniid(dataset, num_users,degree):
     num_normal = 280000//num_users
@@ -478,43 +468,15 @@ def noniid(dataset, num_users,degree):
     comb = list()
     for i in range(int(math.ceil(num_users/len(list(combinations([i for i in range(1, 5)], degree)))))):
         comb += list(combinations([i for i in range(1, 5)], degree))
-    # comb_rand = random.sample(comb, 100)
-    comb_rand = comb[0:100]
+    comb_rand = random.sample(comb, 100)
     print('comb',len(comb_rand))
     for i,classes in enumerate(comb_rand):
-        # rand_set_normal = np.random.choice(dict_class_index[0], num_normal, replace=False)
-        rand_set_normal = dict_class_index[0][0:num_normal]
+        rand_set_normal = np.random.choice(dict_class_index[0], num_normal, replace=False)
         dict_users[i] = np.concatenate((dict_users[i], rand_set_normal), axis=0)
         dict_class_index[0] = list(set(dict_class_index[0]) - set(rand_set_normal))
         for cls in classes:
             if len(dict_class_index[cls])>= num_attack:
-                # rand_set_attack = np.random.choice(dict_class_index[cls], num_attack, replace=False)
-                rand_set_attack = dict_class_index[cls][0:num_attack]
-                dict_users[i] = np.concatenate((dict_users[i], rand_set_attack), axis=0)
-                dict_class_index[cls] = list(set(dict_class_index[cls]) - set(rand_set_attack))
-            else:
-                dict_users[i] = np.concatenate((dict_users[i], dict_class_index[cls]), axis=0)
-    return dict_users
-
-def noniid2(dataset, num_users):
-    num_shards, num_imgs = 200, 3920
-    dict_users = {i: np.array([], dtype='int64') for i in range(num_users)}
-    idxs = np.arange(112000*7)
-    labels = dataset.labels
-    # sort labels
-    idxs_labels = np.vstack((idxs, labels)) ###[[idxs 0,1,2,3],[labels 5,5,7,2]]
-    idxs_labels = idxs_labels[:,idxs_labels[1,:].argsort()]
-    idxs = idxs_labels[0,:] ### idxs前224000为正常类样本的index，后面每116000为下一类
-    dict_class_index = {} #{i: [] for i in range(7)}
-    dict_class_index[0] = idxs[0:112000]
-    for i in range(1,7):
-        dict_class_index[i] = idxs[112000+(i-1)*112000:112000++i*112000]
-    comb = list(combinations([i for i in range(0, 7)], 2))+list(combinations([i for i in range(0, 7)], 2))+list(combinations([i for i in range(0, 7)], 2))+list(combinations([i for i in range(0, 7)], 2))+list(combinations([i for i in range(0, 7)], 2))
-    comb_rand = random.sample(comb,100)
-    for i,classes in enumerate(comb_rand):
-        for cls in classes:
-            if len(dict_class_index[cls])>= num_imgs:
-                rand_set_attack = np.random.choice(dict_class_index[cls], num_imgs, replace=False)
+                rand_set_attack = np.random.choice(dict_class_index[cls], num_attack, replace=False)
                 dict_users[i] = np.concatenate((dict_users[i], rand_set_attack), axis=0)
                 dict_class_index[cls] = list(set(dict_class_index[cls]) - set(rand_set_attack))
             else:
@@ -537,7 +499,7 @@ def test_img(net_g, datatest):
     data_loader = DataLoader(dataset_test, batch_size=test_BatchSize)
     loss = torch.nn.CrossEntropyLoss()
     for idx, (data, target) in enumerate(data_loader):
-        data, target = Variable(data).to(device), Variable(target).type(torch.LongTensor).to(device)
+        data, target = Variable(data).to(device=device, dtype=torch.double), Variable(target).type(torch.LongTensor).to(device)
         # data, target = Variable(data), Variable(target).type(torch.LongTensor)
         log_probs = net_g(data)
         # sum up batch loss
@@ -568,15 +530,10 @@ def test_w(w, datatest):
     correct = 0
     data_pred = []
     data_label = []
-    x = datatest.x_train
-    y = datatest.y_train
-    anomaly_list = [i for i in range(len(y)) if y[i] != 0]
-    y[anomaly_list] = 1
-    dataset_test = ReadData(x, y)
-    data_loader = DataLoader(dataset_test, batch_size=test_BatchSize)
+    data_loader = DataLoader(datatest, batch_size=test_BatchSize)
     loss = torch.nn.CrossEntropyLoss()
     for idx, (data, target) in enumerate(data_loader):
-        data, target = Variable(data).to(device, dtype=torch.double), Variable(target).type(torch.LongTensor).to(device)
+        data, target = Variable(data).to(device), Variable(target).type(torch.LongTensor).to(device)
         # data, target = Variable(data), Variable(target).type(torch.LongTensor)
         log_probs = net_w(data)
         # sum up batch loss
@@ -589,12 +546,42 @@ def test_w(w, datatest):
         data_label.append(target.cpu().detach().data.tolist())
     list_data_label = list(flatten(data_label))
     list_data_pred = list(flatten(data_pred))
-    print(classification_report(list_data_label, list_data_pred))
-    print(confusion_matrix(list_data_label, list_data_pred))
+    # print(classification_report(list_data_label, list_data_pred))
+    # print(confusion_matrix(list_data_label, list_data_pred))
     # print('test_loss', test_loss)
     test_loss /= len(data_loader.dataset)
     accuracy = 100.00 * correct / len(data_loader.dataset)
     return accuracy, test_loss
+
+def train(net,ldr_train):
+    net.train()
+    # train and update
+    optimizer = torch.optim.Adam(net.parameters())##torch.optim.SGD(net.parameters(), lr=args.lr, momentum=args.momentum)
+    loss_func = torch.nn.CrossEntropyLoss()
+    epoch_loss = []
+    for iter in range(5):
+        correct = 0
+        batch_loss = []
+        for batch_idx, (images, labels) in enumerate(ldr_train):
+            images, labels = images.to(device=device, dtype=torch.double), labels.type(torch.LongTensor).to(device)
+            net.zero_grad()
+            log_probs = net(images)
+            loss = loss_func(log_probs, labels)
+            pred = log_probs.max(1)[1]
+            correct += pred.eq(labels.data.view_as(pred)).cpu().sum()
+            loss.backward()
+            optimizer.step()
+            # if batch_idx % 10 == 0: ##args.verbose and
+            # # if batch_idx % 10 == 0:
+            #     print('Update Epoch: {} [{}/{} ({:.0f}%)]\tLoss: {:.6f}'.format(
+            #         iter, batch_idx * len(images), len(ldr_train.dataset),
+            #               100. * batch_idx / len(ldr_train), loss.item()))
+            batch_loss.append(loss.item())
+        Accuracy = 100. * correct.type(torch.FloatTensor) / dataset_size
+        print('Train Epoch:{}\tLoss:{:.4f}\tAccuracy: {:.4f}'.format(iter, loss.item(),Accuracy))
+        epoch_loss.append(sum(batch_loss) / len(batch_loss))
+    print(classification_report(labels.cpu().data.view_as(pred.cpu()), pred.cpu()))
+    return net.state_dict(), sum(epoch_loss) / len(epoch_loss)
 
 def FedAvg(w):
     w_avg = copy.deepcopy(w[0])
@@ -604,43 +591,6 @@ def FedAvg(w):
         w_avg[k] = torch.div(w_avg[k], len(w))
     return w_avg
 
-def get_2_norm(params_a, params_b):
-    sum = 0
-    for i in params_a.keys():
-        if len(params_a[i]) == 1:
-            sum += pow(np.linalg.norm(params_a[i].cpu().numpy()-\
-                params_b[i].cpu().numpy(), ord=2),2)
-        else:
-            a = copy.deepcopy(params_a[i].cpu().numpy())
-            b = copy.deepcopy(params_b[i].cpu().numpy())
-            x = []
-            y = []
-            for j in a:
-                x.append(copy.deepcopy(j.flatten()))
-            for k in b:
-                y.append(copy.deepcopy(k.flatten()))
-            for m in range(len(x)):
-                sum += pow(np.linalg.norm(x[m]-y[m], ord=2),2)
-    norm = np.sqrt(sum)
-    return norm
-
-def defence_Krum(w, c):
-    c = c+1
-    euclid_dist_list = []
-    euclid_dist_matrix = [[0 for i in range(len(w))] for j in range(len(w))]
-    for i in range(len(w)):
-        for j in range(i,len(w)):
-            euclid_dist_matrix[i][j] = get_2_norm(w[i],w[j])
-            euclid_dist_matrix[j][i] = euclid_dist_matrix[i][j]
-        euclid_dist = euclid_dist_matrix[i][:]
-        euclid_dist.sort()
-        if len(w)>=c:
-            euclid_dist_list.append(sum(euclid_dist[:c]))
-        else:
-            euclid_dist_list.append(sum(euclid_dist))
-    s_w = euclid_dist_list.index(min(euclid_dist_list))
-    w_avg = w[s_w]
-    return  w_avg
 
 def getGradVec(w):
     """Return the gradient flattened to a vector"""
@@ -651,64 +601,6 @@ def getGradVec(w):
     gradVec = torch.cat(gradVec).cpu().numpy()
     return gradVec
 
-def geometric_median(X, eps=1e-5):
-    y = np.mean(X, 0)
-
-    while True:
-        D = cdist(X, [y])
-        nonzeros = (D != 0)[:, 0]
-
-        Dinv = 1 / D[nonzeros]
-        Dinvs = np.sum(Dinv)
-        W = Dinv / Dinvs
-        T = np.sum(W * X[nonzeros], 0)
-
-        num_zeros = len(X) - np.sum(nonzeros)
-        if num_zeros == 0:
-            y1 = T
-        elif num_zeros == len(X):
-            return y
-        else:
-            R = (T - y) * Dinvs
-            r = np.linalg.norm(R)
-            rinv = 0 if r == 0 else num_zeros/r
-            y1 = max(0, 1-rinv)*T + min(1, rinv)*y
-
-        if euclidean(y, y1) < eps:
-            return y1
-
-        y = y1
-
-def defence_GoeMed(w):
-    w_avg = copy.deepcopy(w[0])
-    ### Return the shapes and sizes of the weight matrices
-    gradShapes = []
-    gradSizes = []
-    for k in w[0].keys():
-        gradShapes.append(w[0][k].shape)
-        gradSizes.append(np.prod(w[0][k].shape))
-    ### Return the gradient flattened to a vector
-    w_vec = []
-    for i in range(len(w)):
-       w_vec.append(getGradVec(w[i]))
-    w_vec_array = np.array(w_vec).astype(float)
-    # selected = torch.from_numpy(np.asarray(gmean(w_vec_array, axis=0))) ### 效果差，出现NAN
-    selected = torch.from_numpy(np.asarray(geometric_median(w_vec_array)))
-    ### 另一种计算geometric median方法
-    # distance = euclidean
-    # geometric_mediod = \
-    # min(map(lambda p1: (p1, sum(map(lambda p2: distance(p1, p2), w_vec))), w_vec), key=lambda x: x[1])[0]
-    # selected = torch.from_numpy(np.asarray(geometric_mediod))
-    startPos = 0
-    i = 0
-    for k in w[0].keys():
-        shape = gradShapes[i]
-        size = gradSizes[i]
-        i += 1
-        # assert (size == np.prod(p.grad.data.size()))
-        w_avg[k] = selected[startPos:startPos + size].reshape(shape).to(device)
-        startPos += size
-    return w_avg
 
 def defence_det(w, d_out):
     w_avg = copy.deepcopy(w[0])
@@ -719,169 +611,6 @@ def defence_det(w, d_out):
                 w_avg[k] += w[i][k]
         w_avg[k] = torch.div(w_avg[k], (len(d_out)-sum(d_out)))
     return w_avg
-
-def defence_our(omega_locals,w_locals,w_local_pre):
-    X_norm = []
-    selected_index = {}
-    for i in omega_locals[0].keys():
-        aggregate_index = list()
-        for j in range(0, len(omega_locals)):
-            aggregate_index.append(omega_locals[j][i])
-        selected_index[i] = Counter(list(chain(*aggregate_index)))
-    print('interation', interation, 'client', client)
-    # print('selected_index', selected_index)
-
-    for i in range(0, len(w_locals)):
-        selected_weights = []
-        all_weights = []
-        for n in w_locals[0].keys():
-            # print(n)
-            c = w_locals[i][n].cpu()
-            c_pre = w_local_pre[n].cpu()
-            # all_weights.append((c.view(-1).detach().numpy() - c_pre.view(-1).detach().numpy()))
-            selected_index_dict = dict(selected_index[n])
-            indice = []
-            for a in range(0, len(selected_index_dict)):
-                # if (list(selected_index_dict.values())[a] < 45)&(list(selected_index_dict.values())[a] >40):
-                if (list(selected_index_dict.values())[a] > 90):
-                    # if ((list(selected_index_dict.values())[a] > 30) & (list(selected_index_dict.values())[a] < 40)): # | (list(selected_index_dict.values())[a] > 95)
-                    indice.append(list(selected_index_dict.keys())[a])
-            if len(indice) > 0:
-                indices = torch.tensor(indice)
-                # print('indices', indices)
-                d = torch.index_select(c.view(-1), 0, indices)
-                d_pre = torch.index_select(c_pre.view(-1), 0, indices)
-                selected_weights.append((d.view(-1).detach().numpy() - d_pre.view(-1).detach().numpy()))
-            else:
-                pass
-        X_norm.append(list(chain(*selected_weights)))
-        # X_all.append(list(chain(*all_weights)))
-
-    X_norm = np.array(X_norm)
-    # X_all = np.array(X_all)
-    print('X', X_norm.shape)
-    #### OUR
-    scaler = MinMaxScaler()
-    # scaler = StandardScaler()
-    scaler.fit(X_norm)
-    X_norm = scaler.transform(X_norm)
-    # outliers_fraction = float(num_poison_client/num_clients)
-    # print('######outliers_fraction',outliers_fraction)
-    random_state = 42
-    clf = SOS(contamination=0.4, perplexity=90)
-
-    clf.fit(X_norm)
-    pre_out_label = clf.labels_
-    print('prediction', pre_out_label)
-    print(confusion_matrix(Y_norm.astype(int), pre_out_label))
-    print(classification_report(Y_norm.astype(int), pre_out_label))
-    # print("train AC", accuracy_score(Y_norm.astype(int), pre_out_label))
-    ### Federated aggregation with defence
-    w_glob = defence_det(w_locals, pre_out_label)
-    return w_glob, pre_out_label
-
-def defence_pca(w_locals,w_local_pre):
-    X_norm = []
-    for i in range(0, len(w_locals)):
-        selected_weights = []
-        for n in w_locals[0].keys():
-            # print(n)
-            c = w_locals[i][n].cpu()
-            c_pre = w_local_pre[n].cpu()
-            # selected_weights.append((c.view(-1).detach().numpy()))
-            selected_weights.append((c.view(-1).detach().numpy() - c_pre.view(-1).detach().numpy()))
-        X_norm.append(list(chain(*selected_weights)))
-    X_norm = np.array(X_norm)
-    print('X', X_norm.shape)
-    scaler = MinMaxScaler()
-    # scaler = StandardScaler()
-    scaler.fit(X_norm)
-    X_norm = scaler.transform(X_norm)
-    clf = PCA(n_components=2, contamination=0.4, random_state=42)  ##
-    clf.fit(X_norm)
-    pre_out_label = clf.labels_
-    pre_out_prob = clf.decision_scores_
-    print('prediction', pre_out_label)
-    print(confusion_matrix(Y_norm.astype(int), pre_out_label))
-    print(classification_report(Y_norm.astype(int), pre_out_label))
-    # print("train AC", accuracy_score(Y_norm.astype(int), pre_out_label))
-    ### Federated aggregation with defence
-    w_glob = defence_det(w_locals, pre_out_label)
-    return w_glob
-
-def defence_pca2(w_locals,w_local_pre):
-    X_norm = []
-    for i in range(0, len(w_locals)):
-        selected_weights = []
-        for n in w_locals[0].keys():
-            # print(n)
-            c = w_locals[i][n].cpu()
-            c_pre = w_local_pre[n].cpu()
-            # selected_weights.append((c.view(-1).detach().numpy()))
-            selected_weights.append((c.view(-1).detach().numpy() - c_pre.view(-1).detach().numpy()))
-        X_norm.append(list(chain(*selected_weights)))
-    X_norm = np.array(X_norm)
-    pca = sklearn.decomposition.PCA()
-    X_norm = pca.fit_transform(X_norm)
-    print('X', X_norm.shape)
-    scaler = MinMaxScaler()
-    # scaler = StandardScaler()
-    scaler.fit(X_norm)
-    X_norm = scaler.transform(X_norm)
-    clf = SOS(contamination=0.4, perplexity=95)
-    clf.fit(X_norm)
-    pre_out_label = clf.labels_
-    print('prediction', pre_out_label)
-    print(confusion_matrix(Y_norm.astype(int), pre_out_label))
-    print(classification_report(Y_norm.astype(int), pre_out_label))
-    # print("train AC", accuracy_score(Y_norm.astype(int), pre_out_label))
-    ### Federated aggregation with defence
-    w_glob = defence_det(w_locals, pre_out_label)
-    return w_glob
-
-def defence_vae(w_locals):
-    X_norm = []
-    for i in range(0, len(w_locals)):
-        selected_weights = []
-        for n in w_locals[0].keys():
-            # print(n)
-            c = w_locals[i][n].cpu()
-            selected_weights.append((c.view(-1).detach().numpy()))
-        X_norm.append(list(chain(*selected_weights)))
-    X_norm = np.array(X_norm)
-    selected_index_x = joblib.load('vae_selected_index_unsw15_20210731.dpl')
-    X_norm = X_norm[:, selected_index_x]
-    print('X', X_norm.shape)
-    model = torch.load('vae_128dim_unsw15_20210731.pkl')
-    model.eval()
-    running_loss = []
-    pre_out_label = []
-    for i in range(X_norm.shape[0]):
-        single_x = torch.tensor(X_norm[i]).float()
-        x_in = Variable(single_x).to(device)
-        x_out, z_mu, z_logvar = model(x_in)
-        # loss = self.criterion(x_out, x_in, z_mu, z_logvar)
-        x_out = x_out.view(-1)
-        x_in = x_in.view(-1)
-        bce_loss = F.mse_loss(x_out, x_in, size_average=False)
-        kld_loss = -0.5 * torch.sum(1 + z_logvar - (z_mu ** 2) - torch.exp(z_logvar))
-        # kld_loss = 0.5 * torch.sum(-1 - z_logvar + (z_mu ** 2) + torch.exp(z_logvar))
-        loss = (bce_loss + kld_loss)
-        running_loss.append(loss.item())
-    score_avg = np.mean(running_loss)
-    for score in running_loss:
-        if score > score_avg:
-            pre_out_label.append(1)
-        else:
-            pre_out_label.append(0)
-    print('prediction', pre_out_label)
-    print(confusion_matrix(Y_norm.astype(int), pre_out_label))
-    print(classification_report(Y_norm.astype(int), pre_out_label))
-    # print("train AC", accuracy_score(Y_norm.astype(int), pre_out_label))
-    ### Federated aggregation with defence
-    w_glob = defence_det(w_locals, pre_out_label)
-    return w_glob
-
 
 def consolidate(Model, Weight, MEAN_pre, epsilon):
     OMEGA_current = {n: p.data.clone().zero_() for n, p in Model.named_parameters()}
@@ -897,200 +626,12 @@ def consolidate(Model, Weight, MEAN_pre, epsilon):
         OMEGA_current[n] = OMEGA_add
     return OMEGA_current
 
-class VAE(torch.nn.Module):
-    def __init__(self, input_dim=128, latent_dim=20, hidden_dim=500): #input_dim=784,
-        super(VAE, self).__init__()
-        self.fc_e1 = torch.nn.Linear(input_dim, hidden_dim)
-        self.fc_e2 = torch.nn.Linear(hidden_dim, hidden_dim)
-
-        self.fc_mean = torch.nn.Linear(hidden_dim, latent_dim)
-        self.fc_logvar = torch.nn.Linear(hidden_dim, latent_dim)
-
-        self.fc_d1 = torch.nn.Linear(latent_dim, hidden_dim)
-        self.fc_d2 = torch.nn.Linear(hidden_dim, hidden_dim)
-        self.fc_d3 = torch.nn.Linear(hidden_dim, input_dim)
-
-        self.input_dim = input_dim
-
-    def encoder(self, x_in):
-        x = F.relu(self.fc_e1(x_in.view(-1, self.input_dim)))  ### input （-1，784） output (-1,500)
-        x = F.relu(self.fc_e2(x))  ### (-1,500)
-        mean = self.fc_mean(x)  #### mean (-1,20)
-        logvar = F.softplus(self.fc_logvar(x))  ### logvar (-1,20)
-        return mean, logvar
-
-    def decoder(self, z):
-        z = F.relu(self.fc_d1(z))  ### decoder input z (-1,20), output (-1,500)
-        z = F.relu(self.fc_d2(z))  ### (-1,500)
-        x_out = F.sigmoid(self.fc_d3(z))  ### (-1,768)
-        return x_out.view(-1, self.input_dim)
-
-    def sample_normal(self, mean, logvar):
-        # sd = torch.exp(logvar * 0.5)
-        # e = Variable(torch.randn(sd.size())).to(device)  # Sample from standard normal
-        # z = e.mul(sd).add_(mean)
-        std =logvar.mul(0.5).exp_()
-        eps = torch.cuda.FloatTensor(std.size()).normal_()
-        eps = Variable(eps)
-        z = eps.mul(std).add_(mean)
-        return z
-
-    def forward(self, x_in):
-        z_mean, z_logvar = self.encoder(x_in)
-        z = self.sample_normal(z_mean, z_logvar)
-        x_out = self.decoder(z)
-        return x_out, z_mean, z_logvar
-
-def test_adv(net_g, data_loader):
-    net_g.eval()
-    test_loss = 0
-    correct = 0
-    data_pred = []
-    data_label = []
-    loss = torch.nn.CrossEntropyLoss()
-    for idx, (data, target) in enumerate(data_loader):
-        data, target = Variable(data).to(device), Variable(target).type(torch.LongTensor).to(device)
-        log_probs = net_g(data)
-        test_loss += loss(log_probs, target).item()
-        y_pred = log_probs.data.detach().max(1, keepdim=True)[1]
-        correct += y_pred.eq(target.data.detach().view_as(y_pred)).long().cpu().sum()
-        data_pred.append(y_pred.cpu().detach().data.tolist())
-        data_label.append(target.cpu().detach().data.tolist())
-    list_data_label = list(flatten(data_label))
-    list_data_pred = list(flatten(data_pred))
-    print(classification_report(list_data_label, list_data_pred))
-    print(confusion_matrix(list_data_label, list_data_pred))
-    test_loss /= len(data_loader.dataset)
-    accuracy = 100.00 * correct / len(data_loader.dataset)
-    print('\nTest adv set: Average loss: {:.4f} \nAccuracy: {}/{} ({:.2f}%)\n'.format(
-        test_loss, correct, len(data_loader.dataset), accuracy))
-
-def cw_l2_attack(model, images, labels, targeted=False,c=1.0 , kappa=0, max_iter=1000, learning_rate=0.1):
-    model = model.to(device)
-    images = images.to(device)
-    labels = labels.to(device)
-    # Define f-function
-    def f(x):
-        x = x.to(device)
-        # print('x',x)
-        outputs = model(x)
-        # print('outputs', outputs)
-        one_hot_labels = torch.eye(len(outputs[0]),device=device)[labels]#.to(device)
-        # print('one_hot_labels', one_hot_labels)
-        i, _ = torch.max((1 - one_hot_labels) * outputs, dim=1) ##除标签类外最大的概率
-        # print('outputs',outputs)
-        # print('one_hot_labels.bool()',one_hot_labels.bool())
-        j = torch.masked_select(outputs, one_hot_labels.bool())#byte(), 标签类对应的概率
-        # If targeted, optimize for making the other class most likely
-        if targeted:
-            return torch.clamp(i - j, min=-kappa)
-        # If untargeted, optimize for making the other class most likely
-        else:
-            return torch.clamp(j - i, min=-kappa)
-
-    changes_index = list(set([i for i in range(42)])-set([3,5,7,10,12,14,16,18,22,26,30])) ### 31 changed featurese
-    images_change = images[:,:,changes_index]
-    w = torch.zeros_like(images_change, requires_grad=True).to(device)
-    optimizer = torch.optim.Adam([w], lr=learning_rate)
-    prev = 1e10
-    for step in range(max_iter):
-        # print(torch.nn.Tanh()(w))
-        # print( (1 / 2 * (torch.nn.Tanh()(w) + 1)))
-        a0 = (1 / 2 * (torch.nn.Tanh()(w) + 1))
-        a = images
-        # print('a0',a0)
-        a[:,:,changes_index]=a0[:,:,0:len(changes_index)]
-        # print('a',a)
-        loss1 = torch.nn.MSELoss(reduction='sum')(a0, images[:,:,0:len(changes_index)])
-        loss2 = torch.sum(c * f(a))
-        cost = loss1 + loss2
-        optimizer.zero_grad()
-        cost.backward(retain_graph=True)
-        optimizer.step()
-
-        # if loss2.item() == 0.0:
-        #     attack_images_change = 1 / 2 * (torch.nn.Tanh()(w) + 1)
-        #     attack_images = images
-        #     attack_images[:, :, changes_index] = attack_images_change[:, :, 0:len(changes_index)]
-        #     print('Stop cost', cost.item(), 'loss1 MSE', loss1.item(), 'loss2 prediction', loss2.item())
-        #     return attack_images
-        # Early Stop when loss does not converge.
-        # if step % (max_iter // 10) == 0:
-        #     if cost > prev:
-        #         print('Attack Stopped due to CONVERGENCE....')
-        #         return a
-        #     prev = cost
-        # print('- Learning Progress : %2.2f %%        ' % ((step + 1) / max_iter * 100), end='\r')
-    print('cost',cost.item(),'loss1 MSE',loss1.item(),'loss2 prediction',loss2.item())
-    attack_images_change = 1 / 2 * (torch.nn.Tanh()(w) + 1)
-    attack_images = images
-    attack_images[:,:,changes_index] = attack_images_change[:,:,0:len(changes_index)]
-    return attack_images
-
-def poisongan(model,x,y):
-    x = x.to(device)
-    y = y.to(device)
-    changes_index = list(
-        set([i for i in range(42)]) - set([3, 5, 7, 10, 12, 14, 16, 18, 22, 26, 30]))  ### 31 changed featurese
-    D = model
-    #####
-    h_in = 42
-    h_dim = 128
-    G = torch.nn.Sequential(
-        torch.nn.Linear(h_in, h_dim),
-        torch.nn.LeakyReLU(True),
-        torch.nn.Linear(h_dim, h_in),
-        torch.nn.Sigmoid()
-    )
-    G = G.double().to(device)
-    ####
-    # G = Generator().double().to(device)
-    optimizer = torch.optim.Adam(G.parameters(), lr=1e-4)#, lr=0.1
-    for i in range(1000):
-        # z = Variable(torch.randn(x.size(0), 31)).to(device, dtype=torch.double)
-        # G_out = G(z)
-        # # x_fake = x.reshape((x.size(0),68))
-        # # x_fake[:,changes_index]=G_out[:,0:len(changes_index)]
-        # # x_fake=x_fake.reshape((x.size(0), 1, 68))
-        # x_fake = x
-        # # print('xfake', x_fake.shape)
-        # x_fake[:,0, changes_index] = G_out[:,0:len(changes_index)]
-        # x_fake = Variable(x_fake)
-        # # x_fake = G_out
-        # # x_fake = x_fake.reshape((x.size(0), 1, 68))
-
-        z = Variable(torch.randn(x.size(0), 42)).to(device, dtype=torch.double)
-        G_out = G(z)
-        x_fake = G_out.reshape((G_out.size(0), 1, 42))
-        x_fake = Variable(x_fake)
-
-        D_fake = D(x_fake)
-        # D_f, _ = D_fake.max(1)
-        D_f = D_fake[:,0]
-        D_r = D_fake[:, 1]
-        # print('D_fake',D_fake)
-        # print('D_F',D_f)
-        # loss = torch.nn.MSELoss()(x_fake, Variable(x))##reduction='sum'
-        # loss = torch.nn.CrossEntropyLoss()(D_out, Variable(y))
-        loss = -torch.mean(torch.log(D_f))-torch.mean(torch.log(1-D_r))
-        optimizer.zero_grad()
-        loss.backward(retain_graph=True)#
-        optimizer.step()
-        print('loss',loss.item())
-        # z = x_fake
-    return x_fake
-
-
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--defence', type=str, default="our", choices=["fedavg", "our", "krum", "geomed","pca","vae"],
+    parser.add_argument('--defence', type=str, default="our", choices=["our"],
                         help="name of aggregation method")
-    parser.add_argument('--prate', type=float, nargs='?', default=0.1, help="poison instance ratio")
-    parser.add_argument('--Tattack', type=int, nargs='?', default=10, help="attack round")
     args = parser.parse_args()
 
-    prate = args.prate
-    Ta = args.Tattack
     frac = 1.0
     num_clients = 100
     batch_size = 128
@@ -1104,22 +645,18 @@ if __name__ == '__main__':
     # dict_clients = iid(dataset_train, num_users=num_clients)
     dict_clients = noniid(dataset_train,num_clients,1)
 
-    net_global = CNN_UNSW().double().to(device)
+    net_global = CNN_UNSW().double().to(device) #
     # net_global = MLP_UNSW().double().to(device)
     w_glob = net_global.state_dict()
     crit = torch.nn.CrossEntropyLoss()
     net_global.train()
 
-    x_client = {}
-    y_client = {}
-    normal_list_client = {}
-    anomaly_list_client = {}
-    for interation in range(Ta):
+    for interation in range(50):
         w_locals, loss_locals = [], []
         w_local_pre = w_glob
         omega_locals = []
         ##### save the model weight as npy
-        # X_norm = []
+        X_norm = []
         # X_all = []
         Y_norm = np.empty(shape=[0, 1])
 
@@ -1143,57 +680,18 @@ if __name__ == '__main__':
             num_attack1 = np.sum(y == 1)
             num_poison = int(num_attack1 * 1.0)  # 0.8
 
-            if (num_poison > 0) & (num_poison_client<40)& (interation == (Ta-1)): # & (interation > 0)
+            if (num_poison > 0) & (num_poison_client<40): # & (interation > 0)
                 num_poison_client += 1
                 Y_norm = np.row_stack((Y_norm, [1]))  ### 异常为1
                 print('##########poison client', num_poison_client)
                 poison_client_flag = True
-                res_list = [i for i in range(len(y)) if y[i] == 1] ###
-                res_list1 = [i for i in range(len(y)) if y[i] != 1] ### normal
-                ###### 标签翻转
-                # x1 = x[res_list1, :, :] ### clean data
-                # y1 = y[res_list1] ### labels of clean data
-                # y[res_list[0:num_poison]] = 0
-                # x2 = x[res_list, :, :] ### poison data
-                # y2 = y[res_list[0:num_poison]]
-                # x = np.concatenate((x1, x2[0:int(prate * len(x2)), :, :]), axis=0)
-                # y = np.concatenate((y1, y2[0:int(prate * len(x2))]), axis=0)
-                # ldr_train = DataLoader(ReadData(x, y), batch_size=1024, shuffle=True)
-                # epochs_per_task = 5
-                # normal_list_client[client] = res_list1
-                # anomaly_list_client[client] = [i for i in range(len(x1),(len(x1)+int(prate*len(x2))))]
-                ###### CW攻击
-                x1 = x[res_list1, :, :]  ### clean data
-                y1 = y[res_list1]  ### labels of clean data
-                x2 = x[res_list, :, :]
-                y2 = y[res_list]
-                best_model = torch.load('save_model_unsw15_noniid_20210802.pkl')
-                x2_adv = cw_l2_attack(model=best_model, images=torch.tensor(x2), labels=torch.LongTensor(y2),
-                                      targeted=False, c=1.0, kappa=0, max_iter=20, learning_rate=0.1)
-                # x[res_list, :, :] = x2_adv[0:len(res_list), :, :].detach().cpu().numpy()
-                # y[res_list[0:num_poison]] = 0
-                x = np.concatenate((x1, x2_adv[0:int(prate*len(x2_adv)), :, :].detach().cpu().numpy()), axis=0)
-                y = np.concatenate((y1, y2[0:int(prate*len(x2_adv))]), axis=0)
-                ldr_train = DataLoader(ReadData(x, y), batch_size=1024, shuffle=True)
-                # test_adv(best_model, ldr_train)
-                epochs_per_task = 20
-                normal_list_client[client] = res_list1
-                anomaly_list_client[client] = [i for i in range(len(x1), (len(x1) + int(prate * len(x2))))]
+                res_list = [i for i in range(len(y)) if y[i] == 1]
+                y[res_list[0:num_poison]] = 0
             else:
                 Y_norm = np.row_stack((Y_norm, [0]))
                 poison_client_flag = False
-                ldr_train = DataLoader(ReadData(x, y), batch_size=1024, shuffle=True)
-                epochs_per_task = 5
-                if interation == (Ta-1):
-                    normal_list_client[client] = [i for i in range(len(y)) if y[i] == 0]
-                    anomaly_list_client[client] = [i for i in range(len(y)) if y[i] != 0]
-
-            # ldr_train = DataLoader(ReadData(x, y), batch_size=1024, shuffle=True)
-            # test_adv(best_model, ldr_train)
-            # epochs_per_task = 5
-            if interation == (Ta-1):
-                x_client[client] = x
-                y_client[client] = y
+            ldr_train = DataLoader(ReadData(x, y), batch_size=1024, shuffle=True)
+            epochs_per_task = 5
 
             dataset_size = len(ldr_train.dataset)
 
@@ -1201,7 +699,7 @@ if __name__ == '__main__':
                 correct = 0
                 for batch_idx, (images, labels) in enumerate(ldr_train):
                     old_par = {n: p.clone().detach() for n, p in net.named_parameters()}
-                    images, labels = Variable(images).to(device), Variable(labels).type(torch.LongTensor).to(device)
+                    images, labels = Variable(images).to(device=device, dtype=torch.double), Variable(labels).type(torch.LongTensor).to(device=device)
                     net.zero_grad()
                     scores = net(images)
                     ce_loss = crit(scores, labels)
@@ -1231,172 +729,173 @@ if __name__ == '__main__':
                 omega_index[k] = Topk_value_index[1].tolist()
             omega_locals.append(omega_index)
 
-            # w_locals.append(copy.deepcopy(net.state_dict()))
-            if poison_client_flag:
-                net_poison = copy.deepcopy(net.state_dict())
-                for key in net_pre.keys():
-                    difference = net_poison[key] - mean_pre[key]
-                    scale_up = 5.0 # 10.0
-                    net_poison[key] = scale_up*difference + mean_pre[key]
-                w_locals.append(net_poison)
-            else:
-                w_locals.append(copy.deepcopy(net.state_dict()))
+            w_locals.append(copy.deepcopy(net.state_dict()))
+            # if poison_client_flag:
+            #     net_poison = copy.deepcopy(net.state_dict())
+            #     for key in net_pre.keys():
+            #         difference = net_poison[key] - mean_pre[key]
+            #         scale_up = 5.0 # 10.0
+            #         net_poison[key] = scale_up*difference + mean_pre[key]
+            #     w_locals.append(net_poison)
+            # else:
+            #     w_locals.append(copy.deepcopy(net.state_dict()))
 
-        if interation == (Ta-1):
-            w_glob,pre_out_label = defence_our(omega_locals, w_locals, w_local_pre)
+        if (args.defence == 'our') : #& (interation > 0)
+            selected_index = {}
+            for i in omega_locals[0].keys():
+                aggregate_index = list()
+                for j in range(0, len(omega_locals)):
+                    aggregate_index.append(omega_locals[j][i])
+                selected_index[i] = Counter(list(chain(*aggregate_index)))
+            print('interation', interation, 'client', client)
+            print('selected_index', selected_index)
+
+            for i in range(0, len(w_locals)):
+                selected_weights = []
+                all_weights = []
+                for n in w_locals[0].keys():
+                    # print(n)
+                    c = w_locals[i][n].cpu()
+                    c_pre = w_local_pre[n].cpu()
+                    # all_weights.append((c.view(-1).detach().numpy() - c_pre.view(-1).detach().numpy()))
+                    selected_index_dict = dict(selected_index[n])
+                    indice = []
+                    for a in range(0, len(selected_index_dict)):
+                        # if (list(selected_index_dict.values())[a] < 45)&(list(selected_index_dict.values())[a] >40):
+                        if (list(selected_index_dict.values())[a]>90):
+                        # if ((list(selected_index_dict.values())[a] > 30) & (list(selected_index_dict.values())[a] < 40)): # | (list(selected_index_dict.values())[a] > 95)
+                            indice.append(list(selected_index_dict.keys())[a])
+                    if len(indice) > 0:
+                        indices = torch.tensor(indice)
+                        # print('indices', indices)
+                        d = torch.index_select(c.view(-1), 0, indices)
+                        d_pre = torch.index_select(c_pre.view(-1), 0, indices)
+                        selected_weights.append((d.view(-1).detach().numpy() - d_pre.view(-1).detach().numpy()))
+                    else:
+                        pass
+                X_norm.append(list(chain(*selected_weights)))
+                # X_all.append(list(chain(*all_weights)))
+
+            X_norm = np.array(X_norm)
+            # X_all = np.array(X_all)
+            print('X', X_norm.shape)
+            #### OUR
+            scaler = MinMaxScaler()
+            # scaler = StandardScaler()
+            scaler.fit(X_norm)
+            X_norm = scaler.transform(X_norm)
+            # outliers_fraction = float(num_poison_client/num_clients)
+            # print('######outliers_fraction',outliers_fraction)
+            random_state = 42
+            clf = SOS(contamination=0.4, perplexity=90)
+            clf.fit(X_norm)
+            pre_out_label = clf.labels_
+            print('prediction', pre_out_label)
+            print(confusion_matrix(Y_norm.astype(int), pre_out_label))
+            print(classification_report(Y_norm.astype(int), pre_out_label))
+            # print("train AC", accuracy_score(Y_norm.astype(int), pre_out_label))
+            ### Federated aggregation with defence
+            w_glob = defence_det(w_locals, pre_out_label)
             test_acc, test_loss = test_w(w_glob, dataset_test)
-            print('OUR Test set: Average loss: {:.4f} \tAccuracy: {:.2f}'.format(test_loss, test_acc))
-            print('###########Filter##################')
-            normal_client_indexs = []
-            poison_client_indexs = []
-            for i in range(len(pre_out_label)):
-                if pre_out_label[i] == 1:
-                    poison_client_indexs.append(np.int(i))
-                else:
-                    normal_client_indexs.append(np.int(i))
-            model = CNN_UNSW().to(device)  #
-            model.load_state_dict(w_glob)
-            model = model.eval()
-            profiler = TorchProfiler(model)
-            layerdict = profiler.create_layers(0)  #### all layers
-            print(layerdict)
-            tp = profiler.create_profile(torch.rand(1, 1, 42), layerdict, threshold=0.5, show_progress=False,
-                                         parallel=False)
-            class_profiles = dict()
-            selected_index = dict()
-            class_profiles_mal = dict()
-            iou_normal = dict()
-            iou_threshold = dict()
-            neuron_count = {1: 12, 2: 28, 3: 3, 4: 1, 5: 1}
-            # neuron_count = {1: 12, 2: 28, 3: 16, 4: 8, 5: 8}
-            #####predefine class_profiles,class_profiles_mal,selected_index(class path),iou_normal(threshold)
-            for cls in range(2):
-                class_profiles[cls] = dict()
-                selected_index[cls] = dict()
-                class_profiles_mal[cls] = dict()
-                iou_normal[cls] = list()
-                for layer in tp.neuron_counts:
-                    class_profiles[cls][layer] = list()
-                    selected_index[cls][layer] = Counter({})
-                    class_profiles_mal[cls][layer] = list()
-                    # print(tp.neuron_counts[layer])
-                    # print('Layer ', layer, 'the number of important neurons:', len(list(chain(*tp.neuron_counts[layer][0]))))
+            print('Current clf Test set: Average loss: {:.4f} \tAccuracy: {:.2f}'.format(test_loss, test_acc))
 
-            for index in normal_client_indexs:
-                # # print('normal client', index)
-                # idx_traindataset = DatasetSplit(dataset_train, dict_clients[index])
-                # images = idx_traindataset.features.detach().cpu().numpy()  # .numpy()
-                # # print('images',images.shape)
-                # labels = idx_traindataset.labels.detach().cpu().numpy()
-                # anomaly_list = [i for i in range(len(labels)) if labels[i] != 0]
-                # labels[anomaly_list] = 1
-                # if Y_norm[index] == 1:
-                #     for i in range(len(labels)):
-                #         if labels[i] == 1:
-                #             labels[i] = 0
+            if test_acc > 95.0:
+                print('#############################')
+                normal_client_indexs = []
+                poison_client_indexs = []
+                for i in range(len(pre_out_label)):
+                    if pre_out_label[i] == 1:
+                        poison_client_indexs.append(np.int(i))
+                    else:
+                        normal_client_indexs.append(np.int(i))
+                model = CNN_UNSW().to(device)  #
+                model.load_state_dict(w_glob)
+                # model = copy.deepcopy(net_glob).to(args.device)
+                # model.float()
+                model = model.eval()
+                profiler = TorchProfiler(model)
+                layerdict = profiler.create_layers(0)  #### all layers
+                print(layerdict)
+                tp = profiler.create_profile(torch.rand(1, 1, 42), layerdict, threshold=0.1, show_progress=False,
+                                             parallel=False)
+                class_profiles = dict()
+                selected_index = dict()
+                class_profiles_mal = dict()
+                for cls in range(2):
+                    class_profiles[cls] = dict()
+                    selected_index[cls] = dict()
+                    class_profiles_mal[cls] = dict()
+                    for layer in tp.neuron_counts:
+                        class_profiles[cls][layer] = list()
+                        selected_index[cls][layer] = Counter({})
+                        class_profiles_mal[cls][layer] = list()
 
-                images = x_client[index]
-                labels = y_client[index]
-
-                normal_client_sampling_indexs = [i for i in range(len(labels))]
-                normal_client_sampling_index = np.random.choice(normal_client_sampling_indexs,
-                                                                int(len(labels) * 0.03),
-                                                                replace=False)
-                # for i in range(len(labels)):
-                for i in normal_client_sampling_index:
-                    tprofiles = profiler.create_profile(torch.Tensor(images[i]).resize_(1, 1, 42),
-                                                        layerdict,
-                                                        threshold=0.5,
-                                                        show_progress=False,
-                                                        parallel=False)
-                    for layer in tprofiles.neuron_counts:
-                        if layer == 0:
-                            ###### 考虑预测错误样本加入神经元的聚合
-                            # class_profiles[labels[i]][layer].append(tprofiles.neuron_counts[layer])
-                            ###### 只聚合预测正确样本的神经元
-                            if (tprofiles.neuron_counts[0])[0] == labels[i]:
-                                class_profiles[labels[i]][layer].append(tprofiles.neuron_counts[layer])
-                        else:
-                            ###### 考虑预测错误样本加入神经元的聚合
-                            # class_profiles[labels[i]][layer].append(list(chain(*tprofiles.neuron_counts[layer][0])))
-                            ###### 只聚合预测正确样本的神经元
-                            if (tprofiles.neuron_counts[0])[0] == labels[i]:
-                                class_profiles[labels[i]][layer].append(
-                                    list(chain(*tprofiles.neuron_counts[layer][0])))
-                        selected_index[labels[i]][layer] += Counter(list(chain(*class_profiles[labels[i]][layer])))
-            for cls in range(2):
-                for i in range(len(class_profiles[cls][1])):
-                    ious = list()
-                    for layer in range(1, 6):
-                        ious.append(jaccard_simple(set(class_profiles[cls][layer][i]),
-                                                   set([val[0] for j, val in enumerate(
-                                                       selected_index[cls][layer].most_common(
-                                                           neuron_count[layer]))])))
-                    avg_ious = np.mean(ious)
-                    iou_normal[cls].append(avg_ious)
-            for cls in range(2):
-                # iou_threshold[cls] = np.median(np.array(iou_normal[cls]))
-                iou_threshold[cls] = np.percentile(np.array(iou_normal[cls]), 5)
-            print('iou_threshold', iou_threshold)
-            print('###############normal client done')
-            for client in poison_client_indexs:
-                # print('poison client', client)
-                # ldr_train_pre = DatasetSplit(dataset_train, dict_clients[client])
-                # images = ldr_train_pre.features.detach().cpu().numpy()  # .numpy()
-                # print('images',images.shape)
-                # labels = ldr_train_pre.labels.detach().cpu().numpy()
-                # anomaly_list = [i for i in range(len(labels)) if labels[i] != 0]
-                # normal_list = [i for i in range(len(labels)) if labels[i] == 0]
-                # labels[anomaly_list] = 1
-                # ###### label-fliping attack
-                # if Y_norm[client] == 1:
-                #     for i in range(len(labels)):
-                #         if labels[i] == 1:
-                #             labels[i] = 0
-
-                images = x_client[client]
-                labels = y_client[client]
-                anomaly_list = anomaly_list_client[client]
-                normal_list = normal_list_client[client]
-
-                normal_list_predicted = []
-                anomaly_list_predicted = []
-                for i in range(len(labels)):
-                    tprofiles_mal = profiler.create_profile(torch.Tensor(images[i]).resize_(1, 1, 42),
+                for index in normal_client_indexs:
+                    # print('normal client', index)
+                    idx_traindataset = DatasetSplit(dataset_train, dict_clients[index])
+                    images = idx_traindataset.features.detach().cpu().numpy()  # .numpy()
+                    # print('images',images.shape)
+                    labels = idx_traindataset.labels.detach().cpu().numpy()
+                    anomaly_list = [i for i in range(len(labels)) if labels[i] != 0]
+                    labels[anomaly_list] = 1
+                    normal_client_sampling_indexs = [i for i in range(len(labels))]
+                    normal_client_sampling_index = np.random.choice(normal_client_sampling_indexs,
+                                                                    int(len(labels) * 0.1),
+                                                                    replace=False)
+                    # for i in range(len(labels)):
+                    for i in normal_client_sampling_index:
+                        tprofiles = profiler.create_profile(torch.Tensor(images[i]).resize_(1, 1, 42),
                                                             layerdict,
-                                                            threshold=0.5,
+                                                            threshold=0.1,
                                                             show_progress=False,
                                                             parallel=False)
-                    ious = list()
-                    for layer in range(1, 6):
-                        ious.append(jaccard_simple(set(list(chain(*tprofiles_mal.neuron_counts[layer][0]))),
-                                                   set([val[0] for j, val in enumerate(
-                                                       selected_index[labels[i]][layer].most_common(
-                                                           neuron_count[layer]))])))
-                    avg_ious = np.mean(ious)
-                    if avg_ious < iou_threshold[labels[i]]:
-                        anomaly_list_predicted.append(i)
-                    # if avg_ious >= iou_threshold[labels[i]]:
-                    #     if labels[i] == 0:
-                    #         normal_list_predicted.append(i)
-                    #     else:
-                    #         anomaly_list_predicted.append(i)
-                    # else:
-                    #     ious = list()
-                    #     for layer in range(1, 6):
-                    #         ious.append(jaccard_simple(set(list(chain(*tprofiles_mal.neuron_counts[layer][0]))),
-                    #                                    set([val[0] for j, val in enumerate(
-                    #                                        selected_index[1][layer].most_common(
-                    #                                            neuron_count[layer]))])))
-                    #     avg_ious = np.mean(ious)
-                    #     if avg_ious >= iou_threshold[1]:
-                    #         anomaly_list_predicted.append(i)
-                # recall_normal = set(normal_list_predicted).intersection(set(normal_list))
-                recall_anomaly = set(anomaly_list_predicted).intersection(set(anomaly_list))
-                # print('normal 0', 'recall of predicted: ', len(recall_normal) / len(normal_list_predicted),
-                #       'recall of all: ', len(recall_normal) / len(normal_list))
-                print('anomaly 1', 'recall of predicted: ', len(recall_anomaly) / len(anomaly_list_predicted),
-                      'recall of all: ', len(recall_anomaly) / len(anomaly_list),'clean removed: ',(len(anomaly_list_predicted)-len(recall_anomaly))/len(normal_list),'recall_anomaly: ',len(recall_anomaly),len(anomaly_list),len(anomaly_list_predicted),len(normal_list))
+                        for layer in tprofiles.neuron_counts:
+                            if layer == 0:
+                                ###### 考虑预测错误样本加入神经元的聚合
+                                class_profiles[labels[i]][layer].append(tprofiles.neuron_counts[layer])
+                                ###### 只聚合预测正确样本的神经元
+                                # if (tprofiles.neuron_counts[0])[0] == labels[i]:
+                                #     class_profiles[labels[i]][layer].append(tprofiles.neuron_counts[layer])
+                            else:
+                                ###### 考虑预测错误样本加入神经元的聚合
+                                class_profiles[labels[i]][layer].append(list(chain(*tprofiles.neuron_counts[layer][0])))
+                                ###### 只聚合预测正确样本的神经元
+                                # if (tprofiles.neuron_counts[0])[0] == labels[i]:
+                                #     class_profiles[labels[i]][layer].append(
+                                #         list(chain(*tprofiles.neuron_counts[layer][0])))
+                            selected_index[labels[i]][layer] += Counter(list(chain(*class_profiles[labels[i]][layer])))
+                print('###############normal client done')
+                pickle.dump(class_profiles, open('./path_data/normal_class_profiles_UNSW_202107161430.p', 'wb'))
+
+                for client in poison_client_indexs:
+                    print('poison client', client)
+
+                    #### 理想情况，全部用正常数据，不中毒
+                    # ldr_train_true = DataLoader(DatasetSplit(dataset_train, dict_clients[client]), batch_size=1024, shuffle=True)
+
+                    ldr_train_pre = DatasetSplit(dataset_train, dict_clients[client])
+                    images = ldr_train_pre.features.detach().cpu().numpy()  # .numpy()
+                    # print('images',images.shape)
+                    labels = ldr_train_pre.labels.detach().cpu().numpy()
+                    anomaly_list = [i for i in range(len(labels)) if labels[i] != 0]
+                    labels[anomaly_list] = 1
+                    for i in range(len(labels)):
+                        if labels[i] == 1:
+                            labels[i] = 0
+                        tprofiles_mal = profiler.create_profile(torch.Tensor(images[i]).resize_(1, 1, 42),
+                                                                layerdict,
+                                                                threshold=0.1,
+                                                                show_progress=False,
+                                                                parallel=False)
+                        for layer in tprofiles_mal.neuron_counts:
+                            if layer == 0:
+                                ###### 考虑预测错误样本加入神经元的聚合
+                                class_profiles_mal[labels[i]][layer].append(tprofiles_mal.neuron_counts[layer])
+                            else:
+                                ###### 考虑预测错误样本加入神经元的聚合
+                                class_profiles_mal[labels[i]][layer].append(list(chain(*tprofiles_mal.neuron_counts[layer][0])))
+                print('###############poison client done')
+                pickle.dump(class_profiles_mal, open('./path_data/poison_class_profiles_UNSW_202107161430.p', 'wb'))
         else:
             w_glob = FedAvg(w_locals)
             # pass
