@@ -121,40 +121,7 @@ class DatasetSplit(Dataset):
         return image, label
 
 
-def iid(dataset, num_users):
-    """
-    Sample I.I.D. client data from dataset
-    :param dataset:
-    :param num_users:
-    :return: dict of image index
-    """
-    num_items = int(len(dataset) / num_users)
-    dict_users, all_idxs = {}, [i for i in range(len(dataset))]
-    for i in range(num_users):
-        dict_users[i] = set(np.random.choice(all_idxs, num_items,
-                                             replace=False))  # Generates random samples from all_idexs,return a array with size of num_items
-        all_idxs = list(set(all_idxs) - dict_users[i])
-    return dict_users
-
-def mnist_noniid(dataset, num_users):
-    num_shards, num_imgs = 500,1568  #400, 1960
-    idx_shard = [i for i in range(num_shards)]
-    dict_users = {i: np.array([], dtype='int64') for i in range(num_users)}
-    idxs = np.arange(num_shards*num_imgs)
-    labels = dataset.y_train
-    # sort labels
-    idxs_labels = np.vstack((idxs, labels)) ###[[idxs 0,1,2,3],[labels 5,5,7,2]]
-    idxs_labels = idxs_labels[:,idxs_labels[1,:].argsort()]
-    idxs = idxs_labels[0,:]
-    # divide and assign
-    for i in range(num_users):
-        rand_set = set(np.random.choice(idx_shard, 5, replace=False))
-        idx_shard = list(set(idx_shard) - rand_set)
-        for rand in rand_set:
-            dict_users[i] = np.concatenate((dict_users[i], idxs[rand*num_imgs:(rand+1)*num_imgs]), axis=0)
-    return dict_users
-
-def noniid(dataset, num_users,degree):
+def iid(dataset, num_users,degree):
     num_normal = 280000//num_users
     num_attack = 280000//(num_users*degree)
     dict_users = {i: np.array([], dtype='int64') for i in range(num_users)}
@@ -189,30 +156,6 @@ def noniid(dataset, num_users,degree):
                 dict_users[i] = np.concatenate((dict_users[i], dict_class_index[cls]), axis=0)
     return dict_users
 
-def noniid2(dataset, num_users):
-    num_shards, num_imgs = 200, 3920
-    dict_users = {i: np.array([], dtype='int64') for i in range(num_users)}
-    idxs = np.arange(112000*7)
-    labels = dataset.labels
-    # sort labels
-    idxs_labels = np.vstack((idxs, labels)) ###[[idxs 0,1,2,3],[labels 5,5,7,2]]
-    idxs_labels = idxs_labels[:,idxs_labels[1,:].argsort()]
-    idxs = idxs_labels[0,:] ### idxs前224000为正常类样本的index，后面每116000为下一类
-    dict_class_index = {} #{i: [] for i in range(7)}
-    dict_class_index[0] = idxs[0:112000]
-    for i in range(1,7):
-        dict_class_index[i] = idxs[112000+(i-1)*112000:112000++i*112000]
-    comb = list(combinations([i for i in range(0, 7)], 2))+list(combinations([i for i in range(0, 7)], 2))+list(combinations([i for i in range(0, 7)], 2))+list(combinations([i for i in range(0, 7)], 2))+list(combinations([i for i in range(0, 7)], 2))
-    comb_rand = random.sample(comb,100)
-    for i,classes in enumerate(comb_rand):
-        for cls in classes:
-            if len(dict_class_index[cls])>= num_imgs:
-                rand_set_attack = np.random.choice(dict_class_index[cls], num_imgs, replace=False)
-                dict_users[i] = np.concatenate((dict_users[i], rand_set_attack), axis=0)
-                dict_class_index[cls] = list(set(dict_class_index[cls]) - set(rand_set_attack))
-            else:
-                dict_users[i] = np.concatenate((dict_users[i], dict_class_index[cls]), axis=0)
-    return dict_users
 
 
 def test_img(net_g, datatest):
@@ -718,8 +661,7 @@ if __name__ == '__main__':
 
     save_global_model = 'save_model.pkl'
     # # IID Data
-    # dict_clients = iid(dataset_train, num_users=num_clients)
-    dict_clients = noniid(dataset_train,num_clients,1)
+    dict_clients = iid(dataset_train,num_clients,1)
 
     net_global = CNN_UNSW().double().to(device)
     # net_global = MLP_UNSW().double().to(device)
