@@ -643,7 +643,6 @@ if __name__ == '__main__':
                         help="name of aggregation method")
     parser.add_argument('--scalar', type=float, nargs='?', default=1.0, help="sclar for poisoning model")
     parser.add_argument('--Tattack', type=int, nargs='?', default=3, help="attack round")
-    parser.add_argument('--CWT', type=int, nargs='?', default=20, help="CW interation")
     parser.add_argument('--prate', type=float, nargs='?', default=1.0, help="poison instance ratio")
     args = parser.parse_args()
 
@@ -708,17 +707,6 @@ if __name__ == '__main__':
                 y[res_list[0:num_poison]] = 0
                 ldr_train = DataLoader(ReadData(x, y), batch_size=1024, shuffle=True)
                 epochs_per_task = 5
-                ###### CW
-                # x2 = x[res_list, :, :]
-                # y2 = y[res_list]
-                # best_model = torch.load('save_model_unsw15_noniid_20210802.pkl')
-                # x2_adv = cw_l2_attack(model=best_model, images=torch.tensor(x2), labels=torch.LongTensor(y2),
-                #                       targeted=False, c=1.0, kappa=0, max_iter=CWT, learning_rate=0.1) #max_iter=20
-                # x[res_list, :, :] = x2_adv[0:len(res_list), :, :].detach().cpu().numpy()
-                # # y[res_list[0:num_poison]] = 0
-                # ldr_train = DataLoader(ReadData(x, y), batch_size=1024, shuffle=True)
-                # # test_adv(best_model, ldr_train)
-                # epochs_per_task = 50
             else:
                 Y_norm = np.row_stack((Y_norm, [0]))
                 poison_client_flag = False
