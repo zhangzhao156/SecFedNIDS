@@ -1,10 +1,3 @@
-# -*- coding: utf-8 -*-
-# @Time    : 2021/8/4 14:57
-# @Author  : zhao
-# @File    : main_fl_unsw15_oneshot.py
-#### one-shot poisonning attack, test the accuracy of all the methods in this shot
-
-
 import pandas as pd
 import numpy as np
 from sklearn.preprocessing import MinMaxScaler,StandardScaler
@@ -549,92 +542,6 @@ class VAE(torch.nn.Module):
         x_out = self.decoder(z)
         return x_out, z_mean, z_logvar
 
-def test_adv(net_g, data_loader):
-    net_g.eval()
-    test_loss = 0
-    correct = 0
-    data_pred = []
-    data_label = []
-    loss = torch.nn.CrossEntropyLoss()
-    for idx, (data, target) in enumerate(data_loader):
-        data, target = Variable(data).to(device), Variable(target).type(torch.LongTensor).to(device)
-        log_probs = net_g(data)
-        test_loss += loss(log_probs, target).item()
-        y_pred = log_probs.data.detach().max(1, keepdim=True)[1]
-        correct += y_pred.eq(target.data.detach().view_as(y_pred)).long().cpu().sum()
-        data_pred.append(y_pred.cpu().detach().data.tolist())
-        data_label.append(target.cpu().detach().data.tolist())
-    list_data_label = list(flatten(data_label))
-    list_data_pred = list(flatten(data_pred))
-    print(classification_report(list_data_label, list_data_pred))
-    print(confusion_matrix(list_data_label, list_data_pred))
-    test_loss /= len(data_loader.dataset)
-    accuracy = 100.00 * correct / len(data_loader.dataset)
-    print('\nTest adv set: Average loss: {:.4f} \nAccuracy: {}/{} ({:.2f}%)\n'.format(
-        test_loss, correct, len(data_loader.dataset), accuracy))
-
-def cw_l2_attack(model, images, labels, targeted=False,c=1.0 , kappa=0, max_iter=1000, learning_rate=0.1):
-    model = model.to(device)
-    images = images.to(device)
-    labels = labels.to(device)
-    # Define f-function
-    def f(x):
-        x = x.to(device)
-        # print('x',x)
-        outputs = model(x)
-        # print('outputs', outputs)
-        one_hot_labels = torch.eye(len(outputs[0]),device=device)[labels]#.to(device)
-        # print('one_hot_labels', one_hot_labels)
-        i, _ = torch.max((1 - one_hot_labels) * outputs, dim=1) ##除标签类外最大的概率
-        # print('outputs',outputs)
-        # print('one_hot_labels.bool()',one_hot_labels.bool())
-        j = torch.masked_select(outputs, one_hot_labels.bool())#byte(), 标签类对应的概率
-        # If targeted, optimize for making the other class most likely
-        if targeted:
-            return torch.clamp(i - j, min=-kappa)
-        # If untargeted, optimize for making the other class most likely
-        else:
-            return torch.clamp(j - i, min=-kappa)
-
-    changes_index = list(set([i for i in range(42)])-set([3,5,7,10,12,14,16,18,22,26,30])) ### 31 changed featurese
-    images_change = images[:,:,changes_index]
-    w = torch.zeros_like(images_change, requires_grad=True).to(device)
-    optimizer = torch.optim.Adam([w], lr=learning_rate)
-    prev = 1e10
-    for step in range(max_iter):
-        # print(torch.nn.Tanh()(w))
-        # print( (1 / 2 * (torch.nn.Tanh()(w) + 1)))
-        a0 = (1 / 2 * (torch.nn.Tanh()(w) + 1))
-        a = images
-        # print('a0',a0)
-        a[:,:,changes_index]=a0[:,:,0:len(changes_index)]
-        # print('a',a)
-        loss1 = torch.nn.MSELoss(reduction='sum')(a0, images[:,:,0:len(changes_index)])
-        loss2 = torch.sum(c * f(a))
-        cost = loss1 + loss2
-        optimizer.zero_grad()
-        cost.backward(retain_graph=True)
-        optimizer.step()
-
-        # if loss2.item() == 0.0:
-        #     attack_images_change = 1 / 2 * (torch.nn.Tanh()(w) + 1)
-        #     attack_images = images
-        #     attack_images[:, :, changes_index] = attack_images_change[:, :, 0:len(changes_index)]
-        #     print('Stop cost', cost.item(), 'loss1 MSE', loss1.item(), 'loss2 prediction', loss2.item())
-        #     return attack_images
-        # Early Stop when loss does not converge.
-        # if step % (max_iter // 10) == 0:
-        #     if cost > prev:
-        #         print('Attack Stopped due to CONVERGENCE....')
-        #         return a
-        #     prev = cost
-        # print('- Learning Progress : %2.2f %%        ' % ((step + 1) / max_iter * 100), end='\r')
-    print('cost',cost.item(),'loss1 MSE',loss1.item(),'loss2 prediction',loss2.item())
-    attack_images_change = 1 / 2 * (torch.nn.Tanh()(w) + 1)
-    attack_images = images
-    attack_images[:,:,changes_index] = attack_images_change[:,:,0:len(changes_index)]
-    return attack_images
-
 
 
 if __name__ == '__main__':
@@ -642,13 +549,12 @@ if __name__ == '__main__':
     parser.add_argument('--defence', type=str, default="vae", choices=["fedavg", "our", "krum", "geomed","pca","vae"],
                         help="name of aggregation method")
     parser.add_argument('--scalar', type=float, nargs='?', default=1.0, help="sclar for poisoning model")
-    parser.add_argument('--Tattack', type=int, nargs='?', default=3, help="attack round")
+    parser.add_argument('--Tattack', type=int, nargs='?', default=5, help="attack round")
     parser.add_argument('--prate', type=float, nargs='?', default=1.0, help="poison instance ratio")
     args = parser.parse_args()
 
     scalar = args.scalar
     Ta = args.Tattack
-    CWT = args.CWT
     prate = args.prate
     frac = 1.0
     num_clients = 100
@@ -659,11 +565,9 @@ if __name__ == '__main__':
     dataset_test = ReadData(x_test,y_test)
 
     save_global_model = 'save_model.pkl'
-    # # IID Data
     dict_clients = iid(dataset_train,num_clients,1)
 
     net_global = CNN_UNSW().double().to(device)
-    # net_global = MLP_UNSW().double().to(device)
     w_glob = net_global.state_dict()
     crit = torch.nn.CrossEntropyLoss()
     net_global.train()
@@ -672,9 +576,6 @@ if __name__ == '__main__':
         w_locals, loss_locals = [], []
         w_local_pre = w_glob
         omega_locals = []
-        ##### save the model weight as npy
-        # X_norm = []
-        # X_all = []
         Y_norm = np.empty(shape=[0, 1])
 
         num_poison_client = 0
@@ -699,7 +600,7 @@ if __name__ == '__main__':
 
             if (num_poison > 0) & (num_poison_client<40)& (interation == (Ta-1)): # & (interation > 0)
                 num_poison_client += 1
-                Y_norm = np.row_stack((Y_norm, [1]))  ### 异常为1
+                Y_norm = np.row_stack((Y_norm, [1]))  ### anomaly:1,normal:0
                 print('##########poison client', num_poison_client)
                 poison_client_flag = True
                 res_list = [i for i in range(len(y)) if y[i] == 1]
@@ -712,9 +613,6 @@ if __name__ == '__main__':
                 poison_client_flag = False
                 ldr_train = DataLoader(ReadData(x, y), batch_size=1024, shuffle=True)
                 epochs_per_task = 5
-            # ldr_train = DataLoader(ReadData(x, y), batch_size=1024, shuffle=True)
-            # test_adv(best_model, ldr_train)
-            # epochs_per_task = 5
 
             dataset_size = len(ldr_train.dataset)
 
@@ -734,7 +632,6 @@ if __name__ == '__main__':
                     opt_net.step()
                     j = 0
                     for n, p in net.named_parameters():
-                        # print(n,grad_params[j])
                         w[n] -= (grad_params[j].clone().detach()) * (p.detach() - old_par[n])###
                         j += 1
                 Accuracy = 100. * correct.type(torch.FloatTensor) / dataset_size
@@ -747,21 +644,21 @@ if __name__ == '__main__':
                     Topk = 100
                 else:
                     Topk = int(0.1 * len(omega[k].view(-1)))
-                # Topk = int(0.1 * len(omega[k].view(-1)))
                 Topk_value_index = torch.topk(omega[k].view(-1), Topk)
                 omega_index[k] = Topk_value_index[1].tolist()
             omega_locals.append(omega_index)
 
-            # w_locals.append(copy.deepcopy(net.state_dict()))
-            if poison_client_flag:
-                net_poison = copy.deepcopy(net.state_dict())
-                for key in net_pre.keys():
-                    difference = net_poison[key] - mean_pre[key]
-                    scale_up = scalar # 5.0,3.0
-                    net_poison[key] = scale_up*difference + mean_pre[key]
-                w_locals.append(net_poison)
-            else:
-                w_locals.append(copy.deepcopy(net.state_dict()))
+            w_locals.append(copy.deepcopy(net.state_dict()))
+            ### scale up the poisoned model parameteres
+            # if poison_client_flag:
+            #     net_poison = copy.deepcopy(net.state_dict())
+            #     for key in net_pre.keys():
+            #         difference = net_poison[key] - mean_pre[key]
+            #         scale_up = scalar
+            #         net_poison[key] = scale_up*difference + mean_pre[key]
+            #     w_locals.append(net_poison)
+            # else:
+            #     w_locals.append(copy.deepcopy(net.state_dict()))
 
         if interation == (Ta-1):
             ####### no poisonning attack
@@ -847,18 +744,15 @@ if __name__ == '__main__':
 
         # copy weight to net_glob
         net_global.load_state_dict(w_glob)
-        # net_global.load_state_dict(w_glob)
         net_global.eval()
         acc_test, loss_test = test_img(net_global, dataset_test)
         print("Testing accuracy: {:.2f}".format(acc_test))
 
 
-    model_dict = net_global.state_dict()  # 自己的模型参数变量
-    test_dict = {k: w_glob[k] for k in w_glob.keys() if k in model_dict}  # 去除一些不需要的参数
-    model_dict.update(test_dict)  # 参数更新
-    net_global.load_state_dict(model_dict)  # 加载
-
-    # net_global.load_state_dict(w_glob)
+    model_dict = net_global.state_dict()
+    test_dict = {k: w_glob[k] for k in w_glob.keys() if k in model_dict}
+    model_dict.update(test_dict)
+    net_global.load_state_dict(model_dict)
     net_global.eval()
     acc_test, loss_test = test_img(net_global, dataset_test)
     print("Testing accuracy: {:.2f}".format(acc_test))
