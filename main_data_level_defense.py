@@ -131,9 +131,9 @@ class TorchProfiler():
 
         super().__init__()
         self.activation_classes = [m[1] for m in inspect.getmembers(activation, inspect.isclass) if
-                                   m[1].__module__ == 'torch.nn.modules.activation']  #### 激活函数类型
+                                   m[1].__module__ == 'torch.nn.modules.activation']  
         self.dropout_classes = [m[1] for m in inspect.getmembers(dropout, inspect.isclass) if
-                                m[1].__module__ == 'torch.nn.modules.dropout']  ##### dropout函数类型
+                                m[1].__module__ == 'torch.nn.modules.dropout']  
         self.batchnorm_classes = [m[1] for m in inspect.getmembers(batchnorm, inspect.isclass) if
                                   m[1].__module__ == 'torch.nn.modules.batchnorm']
         self.implemented_classes = [torch.nn.Linear,
@@ -175,8 +175,6 @@ class TorchProfiler():
                 namelist.add(kdx)
                 continue
             elif this_type in self.batchnorm_classes:
-                # tmplyer.appendleft(kdx)
-                # namelist.add(kdx)
                 continue
             elif this_type in self.implemented_classes:
                 tmplyer.appendleft(kdx)
@@ -210,7 +208,6 @@ class TorchProfiler():
 
         with torch.no_grad():
             y, actives = self.model.forward(x)
-            # print('actives',actives.keys())
 
             neuron_counts = defaultdict(list)
             synapse_counts = defaultdict(Counter)
@@ -224,8 +221,6 @@ class TorchProfiler():
             mask = torch.zeros_like(y.cpu())
             mask[:, torch.argmax(y.cpu())] = 1
             R = y.cpu() * mask
-            #             R = (torch.max(y[0])).detach().numpy()
-            #             print('R0',R,R.shape)
 
             if n_layers == 0 or n_layers >= len(layerdict):
                 n = len(layerdict)
@@ -249,11 +244,6 @@ class TorchProfiler():
                     neuron_counts[ldx].append(nc)
                     synapse_counts[ldx].update(sc)
                     synapse_weights[ldx].append(sw)
-
-                    #### 保存重要神经元激活值
-                    # ords = [v for v in x_in.cpu().view(-1)]
-                    # for i in selected_index[ldx]:
-                    #     synapse_weights[ldx].append(ords[i].item())  # (i,ords[i])
 
                     R = Rx
 
@@ -284,14 +274,7 @@ class TorchProfiler():
         Rx = torch.nn.functional.max_unpool1d(input=R, indices=indices.cpu(), kernel_size=kernel_size, stride=stride,
                                               padding=maxpool.padding, output_size=x_in.shape)
 
-        #### Topk neuron
-        # # K = 100
-        # K = int(threshold * len(Rx.view(-1)))
-        # TOPK_value_index = torch.topk(Rx.view(-1), K)
-        # neuron_counts.append(TOPK_value_index[1].tolist())
 
-        ### Topk channel
-        # print('Rx',Rx.shape)
         Rx_sum = torch.sum(Rx, dim=2)
         K = int(threshold * len(Rx_sum.view(-1)))
         TOPK_value_index = torch.topk(Rx_sum.view(-1), K)
@@ -321,13 +304,6 @@ class TorchProfiler():
                 Rx[:, :, i * stride:i * stride + kernel_size, j * stride:j * stride + kernel_size] += (
                         (Z / Zs) * R[:, :, i:i + 1, j:j + 1])
 
-        # # K = 100
-        # K = int(threshold * len(Rx.view(-1)))
-        # TOPK_value_index = torch.topk(Rx.view(-1), K)
-        # neuron_counts.append(TOPK_value_index[1].tolist())
-
-        ### Topk channel
-        # print('Rx',Rx.shape)
         Rx_sum = torch.sum(Rx, dim=2)
         K = int(threshold * len(Rx_sum.view(-1)))
         TOPK_value_index = torch.topk(Rx_sum.view(-1), K)
@@ -341,7 +317,7 @@ class TorchProfiler():
         neuron_counts = list()
         synapse_counts = Counter()
         synapse_weights = list()
-        conv, actf = layers  ### conv卷积层，actf激活函数
+        conv, actf = layers 
         conv = self.model.available_modules()[conv]
         actf = self.model.available_modules()[actf]
 
@@ -350,29 +326,16 @@ class TorchProfiler():
         kernel_size = conv.kernel_size[0]
         stride = conv.stride[0]
         padding = conv.padding[0]
-        #         print('kernel',kernel_size,'s',stride,'padding',padding)
         W = conv._parameters['weight']
         B = conv._parameters['bias']
-        #         print('Wcov',W.shape,'Bcov',B.shape)
-
-        #         Rx = torch.zeros_like(x_in)
-
-        #         Z = y_out
+       
         Z = torch.nn.functional.conv1d(x_in, weight=W, bias=None, stride=stride, padding=padding).cpu()
         S = R / (Z + 1e-16 * ((Z >= 0).float() * 2 - 1.))
         C = torch.nn.functional.conv_transpose1d(input=S, weight=W.cpu(), bias=None, stride=stride, padding=padding)
         Rx = C * x_in.cpu()
 
-        # # K = 100
-        # K = int(threshold * len(Rx.view(-1)))
-        # TOPK_value_index = torch.topk(Rx.view(-1), K)
-        # neuron_counts.append(TOPK_value_index[1].tolist())
-
-        ### Topk channel
-        # print('Rx',Rx.shape)
         Rx_sum = torch.sum(Rx, dim=2)
         K = int(threshold * len(Rx_sum.view(-1)))
-        # print('K',K)
         TOPK_value_index = torch.topk(Rx_sum.view(-1), K)
         neuron_counts.append(TOPK_value_index[1].tolist())
 
@@ -394,32 +357,22 @@ class TorchProfiler():
             linear, actf = layers
             actf = self.model.available_modules()[actf]
         linear = self.model.available_modules()[linear]
-        # print('linear',linear)
 
         xshape = x_in.shape
         xdims = x_in[0].shape
         if len(xdims) > 1:
             holdx = torch.Tensor(x_in.cpu())
             x_in = x_in[0].view(-1).unsqueeze(0)
-        #         print('linear flatten xin',x_in.shape)
 
         W = linear._parameters['weight']
         B = linear._parameters['bias']
 
-        #         Z = y_out
         Z = torch.nn.functional.linear(x_in, W, bias=None).cpu()
-        #         print('Z',Z.shape)
         S = R / (Z + 1e-16 * ((Z >= 0).float() * 2 - 1.))
-        #         print('S',S.shape,'W',W.shape)
-        #         C = torch.matmul(S,W)
-        #         Rx = (x_in*C).reshape(xshape)
         Rx = torch.nn.functional.linear(S, W.t().cpu(), bias=None)
         Rx *= x_in.cpu()
         Rx = Rx.reshape(xshape)
-        #         print('C',C.shape)
 
-        # print('Rx',Rx.shape)
-        # K = 100
         K = int(threshold * len(Rx.view(-1)))
         TOPK_value_index = torch.topk(Rx.view(-1), K)
         neuron_counts.append(TOPK_value_index[1].tolist())
@@ -562,7 +515,7 @@ def defence_det(w, d_out):
     w_avg = copy.deepcopy(w[0])
     for k in w_avg.keys():
         for i in range(1, len(w)):
-            ### 检测结果0为正常模型，1为异常模型
+            ### 0:clean model，1:poisoned model
             if d_out[i] == 0:
                 w_avg[k] += w[i][k]
         w_avg[k] = torch.div(w_avg[k], (len(d_out) - sum(d_out)))
