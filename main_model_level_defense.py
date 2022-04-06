@@ -410,36 +410,6 @@ def defence_our(omega_locals,w_locals,w_local_pre):
     return w_glob
 
 
-def defence_pca2(w_locals,w_local_pre):
-    X_norm = []
-    for i in range(0, len(w_locals)):
-        selected_weights = []
-        for n in w_locals[0].keys():
-            # print(n)
-            c = w_locals[i][n].cpu()
-            c_pre = w_local_pre[n].cpu()
-            # selected_weights.append((c.view(-1).detach().numpy()))
-            selected_weights.append((c.view(-1).detach().numpy() - c_pre.view(-1).detach().numpy()))
-        X_norm.append(list(chain(*selected_weights)))
-    X_norm = np.array(X_norm)
-    pca = sklearn.decomposition.PCA()
-    X_norm = pca.fit_transform(X_norm)
-    print('X', X_norm.shape)
-    scaler = MinMaxScaler()
-    # scaler = StandardScaler()
-    scaler.fit(X_norm)
-    X_norm = scaler.transform(X_norm)
-    clf = SOS(contamination=0.4, perplexity=95)
-    clf.fit(X_norm)
-    pre_out_label = clf.labels_
-    print('prediction', pre_out_label)
-    print(confusion_matrix(Y_norm.astype(int), pre_out_label))
-    print(classification_report(Y_norm.astype(int), pre_out_label))
-    # print("train AC", accuracy_score(Y_norm.astype(int), pre_out_label))
-    ### Federated aggregation with defence
-    w_glob = defence_det(w_locals, pre_out_label)
-    return w_glob
-
 def defence_vae(w_locals):
     X_norm = []
     for i in range(0, len(w_locals)):
@@ -546,7 +516,7 @@ class VAE(torch.nn.Module):
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
-    parser.add_argument('--defence', type=str, default="vae", choices=["fedavg", "our", "krum", "geomed","pca","vae"],
+    parser.add_argument('--defence', type=str, default="vae", choices=["fedavg", "our", "krum", "geomed","vae"],
                         help="name of aggregation method")
     parser.add_argument('--scalar', type=float, nargs='?', default=1.0, help="sclar for poisoning model")
     parser.add_argument('--Tattack', type=int, nargs='?', default=5, help="attack round")
@@ -649,7 +619,7 @@ if __name__ == '__main__':
             omega_locals.append(omega_index)
 
             w_locals.append(copy.deepcopy(net.state_dict()))
-            ### scale up the poisoned model parameteres
+            ### scale up the poisoned model parameteres to improve the attack success, if needed
             # if poison_client_flag:
             #     net_poison = copy.deepcopy(net.state_dict())
             #     for key in net_pre.keys():
@@ -713,12 +683,6 @@ if __name__ == '__main__':
             print('Time:\t', str(t1 - t0))
             test_acc, test_loss = test_w(w_glob_our, dataset_test)
             print('OUR Test set: Average loss: {:.4f} \tAccuracy: {:.2f}'.format(test_loss, test_acc))
-            t0 = time.clock()
-            w_glob_pca = defence_pca2(w_locals, w_local_pre)
-            t1 = time.clock()
-            print('Time:\t', str(t1 - t0))
-            test_acc_pca, test_loss_pca = test_w(w_glob_pca, dataset_test)
-            print('PCA Test set: Average loss: {:.4f} \tAccuracy: {:.2f}'.format(test_loss_pca, test_acc_pca))
             t0 = time.clock()
             w_glob_vae = defence_vae(w_locals)
             t1 = time.clock()
