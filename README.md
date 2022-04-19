@@ -6,7 +6,7 @@
 - ...
 
 ## Running Experiments
-Launch the label-flipping attack against FL-based NIDS on UNSW-NB15 dataset 
+Attack model: Launch the label-flipping attack against FL-based NIDS on UNSW-NB15 dataset 
 
 Conduct the poisoned model detection:
 
