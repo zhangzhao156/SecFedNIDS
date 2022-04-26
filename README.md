@@ -1,7 +1,7 @@
 # SecFedNIDS
 
 ## Cite 
-Zhao Zhang, Yong Zhang, Da Guo, Lei Yao, Zhao Li,SecFedNIDS: Robust defense for poisoning attack against federated learning-based network intrusion detection system,
+Zhao Z, Yong Z, Da G, Lei Y, Zhao L,SecFedNIDS: Robust defense for poisoning attack against federated learning-based network intrusion detection system,
 Future Generation Computer Systems,Volume 134,2022,Pages 154-169,https://doi.org/10.1016/j.future.2022.04.010.
 
 https://authors.elsevier.com/c/1ezXj,3q5xgP6x
